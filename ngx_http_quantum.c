@@ -6,6 +6,7 @@ typedef struct {
   ngx_flag_t Enabled;
 } ngx_http_quantum_variables_conf_t;
 
+static ngx_int_t ngx_http_quantum_add_variables(ngx_conf_t *cf);
 void* ngx_http_quantum_variables_create_conf(ngx_conf_t* cf);
 char* ngx_http_quantum_variables_merge_conf(
     ngx_conf_t* cf, void* parent, void* child);
@@ -24,7 +25,7 @@ ngx_command_t ngx_http_quantum_variables_commands[] = {
 };
 
 ngx_http_module_t ngx_http_quantum_variables_module_ctx = {
-  NULL, /* preconfiguration */
+  ngx_http_quantum_add_variables, /* preconfiguration */
   ngx_http_quantum_variables_init, /* postconfiguration */
 
   NULL, /* create main configuration */
@@ -72,5 +73,53 @@ char* ngx_http_quantum_variables_merge_conf(
 }
 
 ngx_int_t ngx_http_quantum_variables_init(ngx_conf_t* cf) {
+  return NGX_OK;
+}
+
+static ngx_int_t get_quantum_variable_reqres(
+   ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data);
+
+static ngx_http_variable_t ngx_http_quantum_vars[] = {
+  { ngx_string("quantum"), NULL, get_quantum_variable_reqres, 0, 0, 0 },
+
+  ngx_http_null_variable
+};
+
+static ngx_int_t ngx_http_quantum_add_variables(ngx_conf_t *cf) {
+  ngx_http_variable_t  *var, *v;
+  for (v = ngx_http_quantum_vars; v->name.len; v++) {
+    var = ngx_http_add_variable(cf, &v->name, v->flags);
+    if (var == NULL) {
+      return NGX_ERROR;
+    }
+    var->get_handler = v->get_handler;
+    var->data = v->data;
+  }
+  return NGX_OK;
+}
+
+static ngx_int_t get_quantum_variable_reqres(
+    ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data)
+{
+  static u_char kHyphen[] = "-";
+  int rnd = rand() % 100;
+  if (rnd >= 30) {
+    v->len = 1;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = kHyphen;
+    return NGX_OK;
+  }
+
+  u_char  *p = ngx_pnalloc(r->pool, NGX_ATOMIC_T_LEN);
+  if (p == NULL) {
+      return NGX_ERROR;
+  }
+  v->len = ngx_sprintf(p, "%uA", rnd) - p;
+  v->valid = 1;
+  v->no_cacheable = 0;
+  v->not_found = 0;
+  v->data = p;
   return NGX_OK;
 }
