@@ -4,6 +4,7 @@
 
 typedef struct {
   ngx_flag_t Enabled;
+  ngx_int_t IndexRequestBody;
 } ngx_http_quantum_variables_conf_t;
 
 static ngx_int_t ngx_http_quantum_add_variables(ngx_conf_t *cf);
@@ -64,11 +65,14 @@ void* ngx_http_quantum_variables_create_conf(ngx_conf_t* cf) {
   return conf;
 }
 
+static ngx_str_t kRequestBody = ngx_string("request_body");
+
 char* ngx_http_quantum_variables_merge_conf(
     ngx_conf_t* cf, void* parent, void* child) {
   ngx_http_quantum_variables_conf_t* prev = parent;
   ngx_http_quantum_variables_conf_t* conf = child;
   ngx_conf_merge_value(conf->Enabled, prev->Enabled, 0);
+  conf->IndexRequestBody = ngx_http_get_variable_index(cf, &kRequestBody);
   return NGX_CONF_OK;
 }
 
@@ -112,14 +116,20 @@ static ngx_int_t get_quantum_variable_reqres(
     return NGX_OK;
   }
 
-  u_char  *p = ngx_pnalloc(r->pool, NGX_ATOMIC_T_LEN);
-  if (p == NULL) {
-      return NGX_ERROR;
+  ngx_http_quantum_variables_conf_t* conf =
+      ngx_http_get_module_loc_conf(r, ngx_http_quantum_variables_module);
+  ngx_http_variable_value_t* value =
+    ngx_http_get_indexed_variable(r, conf->IndexRequestBody);
+  if (value == NULL || value->not_found) {
+    v->not_found = 1;
+    v->valid = 0;
+    return NGX_OK;
   }
-  v->len = ngx_sprintf(p, "%uA", rnd) - p;
+
+  v->len = value->len;
   v->valid = 1;
   v->no_cacheable = 0;
   v->not_found = 0;
-  v->data = p;
+  v->data = value->data;
   return NGX_OK;
 }
