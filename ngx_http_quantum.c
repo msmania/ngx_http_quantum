@@ -2,11 +2,24 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#define NGX_HTTP_DELAY_BODY 1000
+
+typedef struct {
+  ngx_flag_t enable;
+} ngx_http_quantum_conf_t;
+
+typedef struct {
+  ngx_event_t event;
+  ngx_chain_t* out;
+} ngx_http_quantum_body_ctx_t;
+
 static char* ngx_http_quantum_set(
     ngx_conf_t* cf,
     ngx_command_t* cmd,
     void* conf);
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf);
+static ngx_int_t ngx_http_delay_body_filter(
+    ngx_http_request_t *r, ngx_chain_t *in);
 
 static ngx_command_t ngx_http_quantum_commands[] = {
   { ngx_string("foo"),
@@ -119,6 +132,8 @@ static char* ngx_http_quantum_set(
   return NGX_CONF_OK;
 }
 
+static ngx_http_request_body_filter_pt ngx_http_next_request_body_filter;
+
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
   ngx_http_core_main_conf_t* cmcf =
     ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
@@ -129,5 +144,72 @@ static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
   }
 
   *h = ngx_http_quantum_preaccess_handler;
+
+  ngx_http_next_request_body_filter = ngx_http_top_request_body_filter;
+  ngx_http_top_request_body_filter = ngx_http_delay_body_filter;
   return NGX_OK;
+}
+
+static void ngx_http_delay_body_cleanup(void* data) {
+  ngx_http_quantum_body_ctx_t *ctx = data;
+  if (ctx->event.timer_set) {
+    ngx_del_timer(&ctx->event);
+  }
+}
+
+static void ngx_http_delay_body_event_handler(ngx_event_t *ev) {
+  ngx_http_request_t* r = ev->data;
+  ngx_connection_t* c = r->connection;
+  ngx_post_event(c->read, &ngx_posted_events);
+}
+
+static ngx_int_t ngx_http_delay_body_filter(
+    ngx_http_request_t *r, ngx_chain_t *in) {
+  ngx_http_quantum_body_ctx_t* ctx =
+    ngx_http_get_module_ctx(r, ngx_http_quantum_module);
+  if (ctx == NULL) {
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_quantum_body_ctx_t));
+    if (ctx == NULL) {
+      return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_http_set_ctx(r, ctx, ngx_http_quantum_module);
+
+    r->request_body->filter_need_buffering = 1;
+  }
+
+  if (ngx_chain_add_copy(r->pool, &ctx->out, in) != NGX_OK) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
+
+  if (!ctx->event.timedout) {
+    if (!ctx->event.timer_set) {
+      /* cleanup to remove the timer in case of abnormal termination */
+      ngx_http_cleanup_t* cln = ngx_http_cleanup_add(r, 0);
+      if (cln == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+      }
+
+      cln->handler = ngx_http_delay_body_cleanup;
+      cln->data = ctx;
+
+      /* add timer */
+      ctx->event.handler = ngx_http_delay_body_event_handler;
+      ctx->event.data = r;
+      ctx->event.log = r->connection->log;
+      ngx_add_timer(&ctx->event, NGX_HTTP_DELAY_BODY);
+    }
+
+    return ngx_http_next_request_body_filter(r, NULL);
+  }
+
+  ngx_int_t rc = ngx_http_next_request_body_filter(r, ctx->out);
+  for (ngx_chain_t* cl = ctx->out; cl; /* void */) {
+    ngx_chain_t* ln = cl;
+    cl = cl->next;
+    ngx_free_chain(r->pool, ln);
+  }
+
+  ctx->out = NULL;
+  return rc;
 }
