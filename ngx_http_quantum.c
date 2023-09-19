@@ -11,16 +11,20 @@ typedef struct {
 typedef struct {
   ngx_event_t event;
   ngx_chain_t* out;
+  off_t  count;
 } ngx_http_quantum_body_ctx_t;
 
 static char* ngx_http_quantum_set(
     ngx_conf_t* cf,
     ngx_command_t* cmd,
     void* conf);
+static ngx_int_t ngx_http_counter_add_variables(ngx_conf_t* cf);
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf);
 static ngx_int_t ngx_http_quantum_header_filter(ngx_http_request_t* r);
 static ngx_int_t ngx_http_delay_body_filter(
     ngx_http_request_t *r, ngx_chain_t *in);
+static ngx_int_t ngx_http_counter_body_filter(
+    ngx_http_request_t* r, ngx_chain_t* in);
 
 static ngx_command_t ngx_http_quantum_commands[] = {
   { ngx_string("foo"),
@@ -34,7 +38,7 @@ static ngx_command_t ngx_http_quantum_commands[] = {
 };
 
 static ngx_http_module_t ngx_http_quantum_module_ctx = {
-  NULL, /* preconfiguration */
+  ngx_http_counter_add_variables, /* preconfiguration */
   ngx_http_quantum_init, /* postconfiguration */
 
   NULL, /* create main configuration */
@@ -135,8 +139,47 @@ static char* ngx_http_quantum_set(
 
 static ngx_http_request_body_filter_pt ngx_http_next_request_body_filter;
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
+static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
+
+static ngx_str_t ngx_http_counter_name = ngx_string("counter");
+
+static ngx_int_t ngx_http_counter_variable(
+    ngx_http_request_t *r,
+    ngx_http_variable_value_t *v,
+    uintptr_t data) {
+  ngx_http_quantum_body_ctx_t* ctx =
+    ngx_http_get_module_ctx(r, ngx_http_quantum_module);
+  if (ctx == NULL) {
+    v->not_found = 1;
+    return NGX_OK;
+  }
+
+  u_char* p = ngx_pnalloc(r->pool, NGX_OFF_T_LEN);
+  if (p == NULL) {
+    return NGX_ERROR;
+  }
+
+  v->data = p;
+  v->len = ngx_sprintf(p, "%O", ctx->count) - p;
+  v->valid = 1;
+  v->no_cacheable = 0;
+  v->not_found = 0;
+  return NGX_OK;
+}
+
+static ngx_int_t ngx_http_counter_add_variables(ngx_conf_t* cf) {
+  ngx_http_variable_t *var =
+    ngx_http_add_variable(cf, &ngx_http_counter_name, 0);
+  if (var == NULL) {
+    return NGX_ERROR;
+  }
+
+  var->get_handler = ngx_http_counter_variable;
+  return NGX_OK;
+}
 
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
+  // Preaccess phase handler
   ngx_http_core_main_conf_t* cmcf =
     ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
   ngx_http_handler_pt* h =
@@ -144,15 +187,16 @@ static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
   if (h == NULL) {
     return NGX_ERROR;
   }
-
   *h = ngx_http_quantum_preaccess_handler;
-
   // Request body filter
   ngx_http_next_request_body_filter = ngx_http_top_request_body_filter;
   ngx_http_top_request_body_filter = ngx_http_delay_body_filter;
   // Response header filter
   ngx_http_next_header_filter = ngx_http_top_header_filter;
   ngx_http_top_header_filter = ngx_http_quantum_header_filter;
+  // Response body filter
+  ngx_http_next_body_filter = ngx_http_top_body_filter;
+  ngx_http_top_body_filter = ngx_http_counter_body_filter;
 
   return NGX_OK;
 }
@@ -235,4 +279,25 @@ static ngx_int_t ngx_http_delay_body_filter(
 
   ctx->out = NULL;
   return rc;
+}
+
+static ngx_int_t ngx_http_counter_body_filter(
+      ngx_http_request_t *r,
+      ngx_chain_t *in) {
+  ngx_http_quantum_body_ctx_t* ctx =
+    ngx_http_get_module_ctx(r, ngx_http_quantum_module);
+  if (ctx == NULL) {
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_quantum_body_ctx_t));
+    if (ctx == NULL) {
+      return NGX_ERROR;
+    }
+
+    ngx_http_set_ctx(r, ctx, ngx_http_quantum_module);
+  }
+
+  for (ngx_chain_t* cl = in; cl; cl = cl->next) {
+    ctx->count += ngx_buf_size(cl->buf);
+  }
+
+  return ngx_http_next_body_filter(r, in);
 }
