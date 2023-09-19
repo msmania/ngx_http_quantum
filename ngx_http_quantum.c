@@ -18,6 +18,7 @@ static char* ngx_http_quantum_set(
     ngx_command_t* cmd,
     void* conf);
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf);
+static ngx_int_t ngx_http_quantum_header_filter(ngx_http_request_t* r);
 static ngx_int_t ngx_http_delay_body_filter(
     ngx_http_request_t *r, ngx_chain_t *in);
 
@@ -133,6 +134,7 @@ static char* ngx_http_quantum_set(
 }
 
 static ngx_http_request_body_filter_pt ngx_http_next_request_body_filter;
+static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 
 static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
   ngx_http_core_main_conf_t* cmcf =
@@ -145,9 +147,30 @@ static ngx_int_t ngx_http_quantum_init(ngx_conf_t* cf) {
 
   *h = ngx_http_quantum_preaccess_handler;
 
+  // Request body filter
   ngx_http_next_request_body_filter = ngx_http_top_request_body_filter;
   ngx_http_top_request_body_filter = ngx_http_delay_body_filter;
+  // Response header filter
+  ngx_http_next_header_filter = ngx_http_top_header_filter;
+  ngx_http_top_header_filter = ngx_http_quantum_header_filter;
+
   return NGX_OK;
+}
+
+static ngx_int_t ngx_http_quantum_header_filter(ngx_http_request_t* r) {
+  if (r->headers_out.status != NGX_HTTP_FORBIDDEN) {
+    return ngx_http_next_header_filter(r);
+  }
+
+  ngx_table_elt_t* h = ngx_list_push(&r->headers_out.headers);
+  if (h == NULL) {
+    return NGX_ERROR;
+  }
+
+  h->hash = 1;
+  ngx_str_set(&h->key, "X-Foo");
+  ngx_str_set(&h->value, "foo");
+  return ngx_http_next_header_filter(r);
 }
 
 static void ngx_http_delay_body_cleanup(void* data) {
